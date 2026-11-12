@@ -1,0 +1,28 @@
+name: ocr-dock
+
+services:
+  app:
+    image: sunqz/ocr-dock:latest
+    container_name: ocr-dock
+    environment:
+      TZ: Asia/Shanghai
+      PUID: "1026"                  # 群晖示例，按实际 UID 修改
+      PGID: "100"                   # 按实际 GID 修改
+      API_KEY: ""                   # 留空会生成 ./data/api_key；自定义至少 16 位
+      MAX_CONCURRENCY: "1"
+      MAX_QUEUE: "4"
+      RATE_LIMIT_PER_MINUTE: "60"
+      ORT_THREADS: "2"
+    ports:
+      - "8083:8080"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    stop_grace_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

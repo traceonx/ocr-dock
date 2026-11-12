@@ -1,0 +1,32 @@
+name: ocr-dock
+
+services:
+  app:
+    image: sunqz/ocr-dock:latest
+    container_name: ocr-dock
+    environment:
+      TZ: Asia/Shanghai
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      API_KEY: ${API_KEY:-}
+      MAX_IMAGE_BYTES: ${MAX_IMAGE_BYTES:-2097152}
+      MAX_PIXELS: ${MAX_PIXELS:-4000000}
+      MAX_CONCURRENCY: ${MAX_CONCURRENCY:-1}
+      MAX_QUEUE: ${MAX_QUEUE:-4}
+      QUEUE_WAIT_SECONDS: ${QUEUE_WAIT_SECONDS:-10}
+      RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-60}
+      ORT_THREADS: ${ORT_THREADS:-2}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+    ports:
+      - "${WEB_BIND:-0.0.0.0}:${WEB_PORT:-8083}:8080"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    stop_grace_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

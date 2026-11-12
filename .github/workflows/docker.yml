@@ -1,0 +1,195 @@
+name: Docker 镜像
+
+# 单镜像 docker.io/sunqz/ocr-dock（独立 OCR API 服务）。
+# 流程：verify（单元测试 + 集成测试）
+#    → build （amd64 / arm64 分别在原生 runner 上构建，按 digest 推送，不打标签）
+#    → push  （合并为多架构镜像并发布 latest / sha-xxx / 版本号标签）
+# pull_request 只执行 verify 和 build（不登录、不推送）。
+#
+# 仓库 Settings → Secrets and variables → Actions → Secrets：
+#   DOCKER_USERNAME  Docker Hub 用户名
+#   DOCKER_PASSWORD  Docker Hub Access Token（Read & Write）或密码
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: docker.io/sunqz/ocr-dock
+  PUBLISH: ${{ github.event_name != 'pull_request' }}
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      # 统一使用 Python 3.12，验证 HTTP API 与真实 CPU OCR 模型。
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      - name: 安装依赖
+        run: pip install -r requirements-dev.txt
+
+      - name: 单元测试与集成测试
+        run: python -m unittest discover -s tests -v
+
+      - name: 检查版本号与标签一致
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(cat VERSION)
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "::error::标签 $GITHUB_REF_NAME 与 VERSION 版本 $version 不一致"; exit 1; }
+
+  build:
+    name: build (${{ matrix.arch }})
+    needs: verify
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: true
+      matrix:
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 读取版本号
+        id: version
+        run: |
+          echo "version=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+          echo "time=$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S')" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 登录 Docker Hub
+        if: env.PUBLISH == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: 构建镜像
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          build-args: |
+            APP_VERSION=${{ steps.version.outputs.version }}
+            GIT_SHA=${{ github.sha }}
+            BUILD_TIME=${{ steps.version.outputs.time }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=${{ env.PUBLISH }}
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,scope=${{ matrix.arch }},mode=max
+
+      - name: 记录 digest
+        if: env.PUBLISH == 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "$RUNNER_TEMP/digests/${digest#sha256:}"
+
+      - name: 验证原生容器启动与真实识别
+        if: env.PUBLISH == 'true'
+        env:
+          OCR_API_KEY: ci-smoke-key-not-for-production
+          TEST_IMAGE: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+        run: |
+          docker run -d --name ocr-dock-check -p 127.0.0.1:18083:8080 \
+            -e API_KEY="$OCR_API_KEY" "$TEST_IMAGE"
+          python tools/check_container.py http://127.0.0.1:18083
+          test "$(docker exec ocr-dock-check id -u)" = "1000"
+
+      - name: 清理验证容器
+        if: always()
+        run: docker rm -fv ocr-dock-check >/dev/null 2>&1 || true
+
+      - uses: actions/upload-artifact@v4
+        if: env.PUBLISH == 'true'
+        with:
+          name: digests-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  push:
+    name: push
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 读取版本号
+        id: version
+        run: echo "version=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digests-*
+          path: ${{ runner.temp }}/digests
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: 生成标签
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ steps.version.outputs.version }},enable={{is_default_branch}}
+            type=sha,prefix=sha-
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: 合并多架构镜像并推送标签
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          test "$(ls | wc -l)" -eq 2 || { echo "::error::应有 amd64 和 arm64 两个 digest"; exit 1; }
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf "$IMAGE@sha256:%s " *)
+
+      - name: 检查结果
+        env:
+          METADATA_JSON: ${{ steps.meta.outputs.json }}
+        run: |
+          tag=$(jq -r '.tags[0]' <<< "$METADATA_JSON")
+          docker buildx imagetools inspect "$tag"
+          {
+            echo "### $IMAGE"
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,7 @@
+# Run from the project root: docker compose -f compose.yaml -f deploy/compose.build.yaml up -d --build
+services:
+  app:
+    image: ocr-dock:local
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
