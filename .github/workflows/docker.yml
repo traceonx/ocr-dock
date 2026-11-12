@@ -58,6 +58,10 @@ jobs:
           python tools/check_container.py http://127.0.0.1:18083
           test "$(docker exec ocr-dock-verify id -u)" = "1000"
 
+      - name: 本地验证失败日志
+        if: failure()
+        run: docker logs ocr-dock-verify 2>&1 || true
+
       - name: 清理本地验证容器
         if: always()
         run: docker rm -fv ocr-dock-verify >/dev/null 2>&1 || true
@@ -136,6 +140,10 @@ jobs:
             -e API_KEY="$OCR_API_KEY" "$TEST_IMAGE"
           python tools/check_container.py http://127.0.0.1:18083
           test "$(docker exec ocr-dock-check id -u)" = "1000"
+
+      - name: 原生验证失败日志
+        if: failure()
+        run: docker logs ocr-dock-check 2>&1 || true
 
       - name: 清理验证容器
         if: always()
